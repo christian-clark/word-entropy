@@ -73,6 +73,7 @@ def main():
     #words = []
     for story in stories:
         #words.extend(story.split(" "))
+        #tokenizer_output = tokenizer("<|endoftext|> " + story)
         tokenizer_output = tokenizer(story)
         ids = tokenizer_output.input_ids
         attn = tokenizer_output.attention_mask
@@ -117,7 +118,7 @@ def main():
                                                     "attention_mask": torch.tensor(attn).unsqueeze(0)}),
                         torch.tensor(ids[1:]), start_idx))
     
-    print("word entropy bori")
+    print("word entropy")
     for batch in batches:
         batch_input, output_ids, start_idx = batch
 
@@ -129,13 +130,27 @@ def main():
         log_probs = torch.log2(probs)
         entropies = torch.sum(-probs*log_probs, dim=1)
 
+#        for i in range(start_idx, len(toks)):
+#            # necessary for diacritics in Dundee
+#            cleaned_tok = tokenizer.convert_tokens_to_string([toks[i]]).replace(" ", "")
+#            if toks[i].startswith("Ġ"):
+#                print(cleaned_tok, entropies[i].item(), "B")
+#            else:
+#                print(cleaned_tok, entropies[i].item(), "I")
+
+        curr_w = ""
+        curr_entropy = -1
         for i in range(start_idx, len(toks)):
-            # necessary for diacritics in Dundee
             cleaned_tok = tokenizer.convert_tokens_to_string([toks[i]]).replace(" ", "")
-            if toks[i].startswith("Ġ"):
-                print(cleaned_tok, entropies[i].item(), "B")
+            if i == start_idx or toks[i].startswith("Ġ"):
+                if curr_w != "":
+                    print(curr_w, curr_entropy)
+                curr_w = cleaned_tok
+                curr_entropy = entropies[i].item()
             else:
-                print(cleaned_tok, entropies[i].item(), "I")
+                curr_w += cleaned_tok
+        print(curr_w, curr_entropy)
+
 
 
 if __name__ == "__main__":
