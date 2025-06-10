@@ -28,7 +28,7 @@ from transformers import (
     DynamicCache
 )
 
-NUM_SAMPLES = 32
+NUM_SAMPLES = 64
 DEBUG = True
 
 def printDebug(*args, **kwargs):

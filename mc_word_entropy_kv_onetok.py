@@ -19,10 +19,16 @@ each with checkpoints specified by training steps:
 "step1", "step2", "step4", ..., "step142000", "step143000"
 """
 
-import sys, torch, transformers
-from transformers import AutoTokenizer, AutoModelForCausalLM, GPTNeoXTokenizerFast, GPTNeoXForCausalLM
+import sys, torch
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    GPTNeoXTokenizerFast,
+    GPTNeoXForCausalLM,
+    DynamicCache
+)
 
-NUM_SAMPLES = 5
+NUM_SAMPLES = 128
 DEBUG = True
 
 def printDebug(*args, **kwargs):
@@ -138,85 +144,53 @@ def main():
         for sample_ix in range(NUM_SAMPLES):
             printDebug(f"\n==== SAMPLE {sample_ix+1} ====")
 
+
             sample_log_probs = list()
 
-            for i in range(len(ids) - 1):
+            for i in range(0, len(ids) - 1):
+                if i == 0:
+                    id_start = torch.tensor(ids[:1]).unsqueeze(0)
+                    attn_start = torch.tensor(attn[:1]).unsqueeze(0)
+                    output = model(input_ids=id_start, attention_maks=attn_start, use_cache=True)
+                else:
+                    next_id = torch.tensor(ids[i:i+1])
+                    printDebug("\nprocessing next token:", tokenizer.convert_ids_to_tokens(next_id))
+                    output = model(
+                        input_ids=next_id,
+                        past_key_values=DynamicCache.from_legacy_cache(master_kv), use_cache=True
+                    )
+                master_kv = output.past_key_values
+                
                 if not word_final[i]: continue
-                printDebug()
+
                 curr_log_prob = 0
-                ids_curr = ids[:i+1]
-                ids_curr_t = torch.tensor(ids_curr).unsqueeze(0)
-                attn_curr = attn[:i+1]
-                attn_curr_t = torch.tensor(attn_curr).unsqueeze(0)
-                model_output = model(input_ids=ids_curr_t, attention_maks=attn_curr_t)
-                all_logits = model_output.logits.squeeze(0)
-                logits = all_logits[-1]
-                # TODO use KV cache
+                logits = output.logits.squeeze(dim=0).squeeze(dim=0)
                 # for the first sampling step, only sample over tokens that
                 # are the beginning of a new word
                 space_logits = logits[space_ixs]
                 space_probs = softmax(space_logits)
-                sampled_ix = torch.multinomial(space_probs, 1, replacement=True)[0]
-                sample_prob = space_probs[sampled_ix]
-                printDebug("sample prob:", sample_prob)
-                curr_log_prob += torch.log2(space_probs[sampled_ix]).item()
+                #sampled_ix = torch.multinomial(space_probs, 1, replacement=True)[0]
+                ix = torch.multinomial(space_probs, 1)[0]
+                sample_prob = space_probs[ix]
+                curr_log_prob += torch.log2(sample_prob).item()
                 # indices should be relative to the whole vocabulary
-                sampled_ix = space_ixs[sampled_ix]
-                printDebug("sampled_ix:", sampled_ix)
-                printDebug("context:", tokenizer.convert_ids_to_tokens(ids_curr))
-                printDebug("sample:", tokenizer.convert_ids_to_tokens(sampled_ix))
+                ix = torch.tensor([space_ixs[ix]])
+                printDebug("sample:", tokenizer.convert_ids_to_tokens(ix.unsqueeze(0))[0], "prob:", sample_prob.item())
 
-                ids_curr = ids_curr + [sampled_ix]
-                ids_curr_t = torch.tensor(ids_curr).unsqueeze(0)
-                attn_curr = attn_curr + [1]
-                attn_curr_t = torch.tensor(attn_curr).unsqueeze(0)
-                model_output = model(input_ids=ids_curr_t, attention_maks=attn_curr_t)
-                logits = model_output.logits.squeeze(0)[-1]
+                output = model(
+                    input_ids=ix.unsqueeze(0),
+                    past_key_values=DynamicCache.from_legacy_cache(master_kv), use_cache=True
+                )
+                sample_kv = output.past_key_values
+                logits = output.logits.squeeze(0)[-1]
                 probs = softmax(logits)
-                # for subsequent sampling steps, options are subword tokens
-                # EOW. EOW sums over all space tokens
-                subword_probs = probs[subword_ixs]
+
+                # next sampled token is forced to be EOW, which sums over all space tokens
                 space_probs = probs[space_ixs]
                 eow_prob = torch.sum(space_probs, dim=0, keepdim=True)
-                printDebug("EOW prob:", eow_prob.item())
-                probs = torch.cat([subword_probs, eow_prob], dim=0)
-                sampled_ix = torch.multinomial(probs, 1, replacement=True)[0].item()
-                sample_prob = probs[sampled_ix]
-                printDebug("sample prob:", sample_prob)
-                curr_log_prob += torch.log2(sample_prob).item()
-                if sampled_ix == len(probs)-1:
-                    eow = True
-                    printDebug("EOW chosen")
-                else:
-                    eow = False
-                while not eow:
-                    sampled_ix = subword_ixs[sampled_ix]
-                    printDebug("next sample:", tokenizer.convert_ids_to_tokens(sampled_ix))
-                    ids_curr = ids_curr + [sampled_ix]
-                    ids_curr_t = torch.tensor(ids_curr).unsqueeze(0)
-                    attn_curr = attn_curr + [1]
-                    attn_curr_t = torch.tensor(attn_curr).unsqueeze(0)
-                    model_output = model(input_ids=ids_curr_t, attention_maks=attn_curr_t)
-                    logits = model_output.logits.squeeze(0)[-1]
-                    probs = softmax(logits)
-                    # for subsequent sampling steps, options are subword tokens
-                    # EOW. EOW sums over all space tokens
-                    subword_probs = probs[subword_ixs]
-                    space_probs = probs[space_ixs]
-                    eow_prob = torch.sum(space_probs, dim=0, keepdim=True)
-                    printDebug("EOW prob:", eow_prob.item())
-                    probs = torch.cat([subword_probs, eow_prob], dim=0)
-                    sampled_ix = torch.multinomial(probs, 1, replacement=True)[0].item()
-                    sample_prob = probs[sampled_ix]
-                    printDebug("sample prob:", sample_prob)
-                    curr_log_prob += torch.log2(sample_prob).item()
-                    if sampled_ix == len(probs)-1:
-                        eow = True
-                        printDebug("EOW chosen")
-                    else:
-                        eow = False
+                printDebug("space prob:", eow_prob.item())
+                curr_log_prob += torch.log2(eow_prob).item()
                 sample_log_probs.append(curr_log_prob)
-
                 printDebug("DONE SAMPLING")
             story_log_probs.append(sample_log_probs)   
 
