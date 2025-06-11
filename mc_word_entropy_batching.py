@@ -170,7 +170,7 @@ def main():
                 curr_end_ix = ix
         half_window_start_ixs.append(len(story_word_final))
         
-        print(half_window_start_ixs)
+        printDebug(half_window_start_ixs)
 
         batches = list()
         for ix in range(len(half_window_start_ixs)-2):
@@ -190,7 +190,7 @@ def main():
                 start_ix=start_ix
             )
             batches.append(batch)
-            print(batch)
+            printDebug(batch)
         
         story_entropies = list()
         for batch in batches:
@@ -223,7 +223,6 @@ def main():
                 sample_log_probs = list()
 
                 for i in range(start_ix, len(ids)):
-                    print(i)
                     next_id = torch.tensor(ids[i:i+1])
                     printDebug("\nprocessing next token:", tokenizer.convert_ids_to_tokens(next_id))
                     if i == 0:
