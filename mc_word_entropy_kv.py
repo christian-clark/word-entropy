@@ -28,7 +28,7 @@ from transformers import (
     DynamicCache
 )
 
-NUM_SAMPLES = 64
+NUM_SAMPLES = 3
 DEBUG = True
 
 def printDebug(*args, **kwargs):
@@ -151,7 +151,7 @@ def main():
                 if i == 0:
                     id_start = torch.tensor(ids[:1]).unsqueeze(0)
                     attn_start = torch.tensor(attn[:1]).unsqueeze(0)
-                    output = model(input_ids=id_start, attention_maks=attn_start, use_cache=True)
+                    output = model(input_ids=id_start, attention_mask=attn_start, use_cache=True)
                 else:
                     next_id = torch.tensor(ids[i:i+1])
                     printDebug("\nprocessing next token:", tokenizer.convert_ids_to_tokens(next_id))
