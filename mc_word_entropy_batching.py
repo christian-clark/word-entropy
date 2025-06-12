@@ -224,6 +224,7 @@ def main():
 
                 for i in range(start_ix, len(ids)):
                     next_id = torch.tensor(ids[i:i+1])
+                    printDebug("next id:", next_id)
                     printDebug("\nprocessing next token:", tokenizer.convert_ids_to_tokens(next_id))
                     if i == 0:
                         output = model(

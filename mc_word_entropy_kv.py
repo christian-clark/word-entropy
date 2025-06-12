@@ -28,7 +28,7 @@ from transformers import (
     DynamicCache
 )
 
-NUM_SAMPLES = 3
+NUM_SAMPLES = 32
 DEBUG = True
 
 def printDebug(*args, **kwargs):
@@ -39,13 +39,24 @@ def get_space_subword_idx(tokenizer):
     space_idx = []
     subword_idx = []
 
+    # invert vocabulary so keys are ids and values are tokens
+    # this allows space_idx and subword_idx to have consistent
+    # orders across runs
+    inverted_vocab = dict()
     for token, idx in tokenizer.vocab.items():
+        inverted_vocab[idx] = token
+        
+    for idx in range(len(inverted_vocab)):
+        token = inverted_vocab[idx]
         if token.startswith("Ġ"):
             space_idx.append(idx)
         else:
             subword_idx.append(idx)
 
-    return space_idx, subword_idx
+    printDebug("space_idx:", space_idx[:20])
+    printDebug("subword_idx:", subword_idx[:20])
+
+    return torch.tensor(space_idx), torch.tensor(subword_idx)
 
 def generate_stories(fn):
     stories = []
@@ -165,17 +176,45 @@ def main():
 
                 curr_log_prob = 0
                 logits = output.logits.squeeze(dim=0).squeeze(dim=0)
-                # for the first sampling step, only sample over tokens that
-                # are the beginning of a new word
-                space_logits = logits[space_ixs]
-                space_probs = softmax(space_logits)
+
+                # GPT2 is not trained to put the initial whitespace
+                # on the token immediately after BOS
+                if ids[i] == bos_id:
+                    first_logits = logits[subword_ixs]
+                    # dim: samples x v
+                    first_probs = softmax(first_logits)
+
+                # all words coming after a word other than BOS will start
+                # with whitespace
+                else:
+                    #printDebug("logits shape:", logits.shape)
+                    #temp_sm = softmax(logits)
+                    #printDebug("top10:", temp_sm.topk(10))
+                    first_logits = logits[space_ixs]
+                    # dim: samples x v
+                    first_probs = softmax(first_logits)
+                    # dim: batch x 1
+
+                # TODO remove
+                topk = first_probs.topk(10)[1]
+                printDebug("topk next tokens (before ix conversion):", topk)
+                if ids[i] == bos_id:
+                    topk = subword_ixs[topk]
+                else:
+                    topk = space_ixs[topk]
+                printDebug("topk next tokens (after ix conversion):", topk)
+                # / TODO remove
+
                 #sampled_ix = torch.multinomial(space_probs, 1, replacement=True)[0]
-                ix = torch.multinomial(space_probs, 1)[0]
-                sample_prob = space_probs[ix]
+                ix = torch.multinomial(first_probs, 1)[0]
+                sample_prob = first_probs[ix]
                 curr_log_prob += torch.log2(sample_prob).item()
                 # indices should be relative to the whole vocabulary
-                ix = torch.tensor([space_ixs[ix]])
-                printDebug("sample:", tokenizer.convert_ids_to_tokens(ix.unsqueeze(0)), "prob:", sample_prob)
+                if ids[i] == bos_id:
+                    ix = torch.tensor([subword_ixs[ix]]) 
+                else:
+                    ix = torch.tensor([space_ixs[ix]]) 
+                printDebug("sample:", ix, "logprob:", torch.log2(sample_prob))
 
                 output = model(
                     input_ids=ix.unsqueeze(0),
@@ -195,12 +234,12 @@ def main():
                 curr_log_prob += torch.log2(sample_prob).item()
                 if ix.item() == len(probs)-1:
                     eow = True
-                    printDebug("EOW chosen, prob", eow_prob.item())
+                    printDebug("EOW chosen, logprob", torch.log2(eow_prob))
                 else:
                     eow = False
                 while not eow:
                     ix = torch.tensor([subword_ixs[ix]])
-                    printDebug("sample:", tokenizer.convert_ids_to_tokens(ix.unsqueeze(0)), "prob:", sample_prob)
+                    printDebug("sample:", ix, "logprob:", torch.log2(sample_prob))
                     output = model(
                         input_ids=ix.unsqueeze(0),
                         past_key_values=DynamicCache.from_legacy_cache(sample_kv), use_cache=True
@@ -220,7 +259,7 @@ def main():
                     curr_log_prob += torch.log2(sample_prob).item()
                     if ix.item() == len(probs)-1:
                         eow = True
-                        printDebug("EOW chosen, prob", eow_prob.item())
+                        printDebug("EOW chosen, logprob", torch.log2(eow_prob))
                     else:
                         eow = False
 
