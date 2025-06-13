@@ -29,13 +29,14 @@ from transformers import (
     DynamicCache
 )
 
-NUM_SAMPLES = 64
+NUM_SAMPLES = 128
+SAMPLES_PER_BATCH = 128
 DEBUG = True
 EOW_IX = 50255
 MAX_ITERATIONS = 20
 
 
-class Batch:
+class Window:
     def __init__(self, input_ids, attn_mask, word_final, start_ix):
         self.input_ids = input_ids
         self.attn_mask = attn_mask
@@ -43,13 +44,13 @@ class Batch:
         self.start_ix = start_ix
 
     def __str__(self):
-        s = "Batch:\n\tInput_ids: {}\n\tAttn_mask: {}\n\tWord_final: {}\n\tStart_ix: {}".format(
+        s = "Window:\n\tInput_ids: {}\n\tAttn_mask: {}\n\tWord_final: {}\n\tStart_ix: {}".format(
             self.input_ids, self.attn_mask, self.word_final, self.start_ix
         )
         return s
 
 
-def printDebug(*args, **kwargs):
+def debug(*args, **kwargs):
     if DEBUG:
         print("DEBUG:", *args, **kwargs, file=sys.stderr)
 
@@ -136,6 +137,7 @@ def main():
     softmax = torch.nn.Softmax(dim=-1)
     ctx_size = model.config.max_position_embeddings
     #ctx_size = 16
+    debug("ctx_size:", ctx_size)
     bos_id = model.config.bos_token_id
     space_ixs, subword_ixs = get_space_subword_idx(tokenizer)
 
@@ -162,12 +164,12 @@ def main():
                 story_word_final.append(False)
         story_word_final.append(True)
 
-        printDebug(story_ids)
-        printDebug(story_word_final)
+        debug(story_ids)
+        debug(story_word_final)
 
         # split ids into subsequences, each of length <= 1/2 * ctx_size.
         # make sure that splits don't land mid-word
-        # consecutive pairs of these subsequences will make up batches.
+        # consecutive pairs of these subsequences will make up windows.
         # set up this way so context windows have 50% overlap
         half_window_start_ixs = [0]
         curr_start_ix = 0
@@ -184,171 +186,135 @@ def main():
         if len(half_window_start_ixs) == 2:
             half_window_start_ixs.append(len(story_word_final))
 
-        printDebug(half_window_start_ixs)
+        debug(half_window_start_ixs)
 
-        batches = list()
+        windows = list()
         for ix in range(len(half_window_start_ixs)-2):
             w_start = half_window_start_ixs[ix]
             w_mid = half_window_start_ixs[ix+1]
             w_end = half_window_start_ixs[ix+2]
-            # first batch will use the entire window
+            # first window will use the entire window
             if ix == 0:
                 start_ix = 0
-            # later batches will use just the second half of the window
+            # later windows will use just the second half of the window
             else:
                 start_ix = w_mid - w_start
-            batch = Batch(
+            window = Window(
                 input_ids=story_ids[w_start:w_end],
                 attn_mask=story_attn[w_start:w_end],
                 word_final=story_word_final[w_start:w_end],
                 start_ix=start_ix
             )
-            batches.append(batch)
-            printDebug(batch)
+            windows.append(window)
+            debug(window)
         
         story_entropies = list()
-        for batch in batches:
-            ids = batch.input_ids
-            attn = batch.attn_mask
-            word_final = batch.word_final
-            start_ix = batch.start_ix
+        for window in windows:
+            ids = window.input_ids
+            attn = window.attn_mask
+            word_final = window.word_final
+            start_ix = window.start_ix
 
-            printDebug(f"\n==== NEW BATCH ====")
-            printDebug("ids", ids)
-            printDebug("attn", attn)
-            printDebug("word_final", word_final)
-            printDebug("start_ix", start_ix)
+            debug(f"\n==== NEW WINDOW ====")
+            debug("ids", ids)
+            debug("attn", attn)
+            debug("word_final", word_final)
+            debug("start_ix", start_ix)
 
-            # process tokens from the first half-window
-            if start_ix > 0:
-                prefix_id = torch.tensor(ids[:start_ix]).repeat(NUM_SAMPLES, 1)
-                prefix_attn = torch.tensor(attn[:start_ix]).repeat(NUM_SAMPLES, 1)
-                printDebug("prefix id:", prefix_id)
-                prefix_output = model(
-                    input_ids=prefix_id,
-                    attention_mask=prefix_attn,
-                    use_cache=True
-                )
-                # samples fork from prefix_kv
-                prefix_kv = prefix_output.past_key_values
+            num_words = sum(word_final)
+            window_log_probs = torch.empty(size=(num_words, 0))
 
-            batch_entropies = list()
-
-            for i in range(start_ix, len(ids)):
-                next_id = torch.tensor(ids[i:i+1]).repeat(NUM_SAMPLES, 1)
-                printDebug("\nnext id:", next_id)
-                printDebug("next token:", tokenizer.convert_ids_to_tokens(next_id))
-                if i == 0:
-                    attn_mask = torch.tensor(attn[:1]).repeat(NUM_SAMPLES, 1)
-                    output = model(
-                        input_ids=next_id,
-                        attention_mask=attn_mask,
+            # just being lazy with this; wouldn't be hard to allow
+            # unequal batches
+            assert NUM_SAMPLES % SAMPLES_PER_BATCH == 0
+            num_batches = NUM_SAMPLES // SAMPLES_PER_BATCH
+            for batch in range(num_batches):
+                debug(f"\n==== NEW BATCH ====")
+                batch_log_probs = list()
+                # process tokens from the first half-window
+                if start_ix > 0:
+                    prefix_id = torch.tensor(ids[:start_ix]).repeat(SAMPLES_PER_BATCH, 1)
+                    prefix_attn = torch.tensor(attn[:start_ix]).repeat(SAMPLES_PER_BATCH, 1)
+                    debug("prefix id:", prefix_id)
+                    prefix_output = model(
+                        input_ids=prefix_id,
+                        attention_mask=prefix_attn,
                         use_cache=True
                     )
-                elif i == start_ix:
+                    # samples fork from prefix_kv
+                    prefix_kv = prefix_output.past_key_values
+
+                for i in range(start_ix, len(ids)):
+                    next_id = torch.tensor(ids[i:i+1]).repeat(SAMPLES_PER_BATCH, 1)
+                    debug("\nnext id:", next_id)
+                    debug("next token:", tokenizer.convert_ids_to_tokens(next_id))
+                    if i == 0:
+                        attn_mask = torch.tensor(attn[:1]).repeat(SAMPLES_PER_BATCH, 1)
+                        output = model(
+                            input_ids=next_id,
+                            attention_mask=attn_mask,
+                            use_cache=True
+                        )
+                    elif i == start_ix:
+                        output = model(
+                            input_ids=next_id,
+                            past_key_values=DynamicCache.from_legacy_cache(prefix_kv), use_cache=True
+                        )
+                    else:
+                        output = model(
+                            input_ids=next_id,
+                            past_key_values=DynamicCache.from_legacy_cache(master_kv), use_cache=True
+                        )
+                    master_kv = output.past_key_values
+                        
+                    if not word_final[i]: continue
+
+                    curr_log_prob = torch.zeros(SAMPLES_PER_BATCH)
+                    logits = output.logits.squeeze(dim=1)
+
+                    # GPT2 is not trained to put the initial whitespace
+                    # on the token immediately after BOS
+                    if ids[i] == bos_id:
+                        first_logits = logits[:, subword_ixs]
+                        first_probs = softmax(first_logits)
+
+                    # all words coming after a word other than BOS will start
+                    # with whitespace
+                    else:
+                        #debug("logits shape:", logits.shape)
+                        #temp_sm = softmax(logits)
+                        #debug("top10:", temp_sm.topk(10))
+                        first_logits = logits[:, space_ixs]
+                        first_probs = softmax(first_logits)
+
+    #                topk = first_probs.topk(10, dim=1)[1]
+    #                if ids[i] == bos_id:
+    #                    topk = subword_ixs[topk]
+    #                else:
+    #                    topk = space_ixs[topk]
+    #                debug("topk next tokens (after ix conversion):", topk)
+
+                    ix = torch.multinomial(first_probs, 1)
+                    # dim: window
+                    sample_prob = first_probs.gather(dim=1, index=ix).squeeze(dim=1)
+                    curr_log_prob += torch.log2(sample_prob)
+                    # indices should be relative to the whole vocabulary
+                    if ids[i] == bos_id:
+                        ix = subword_ixs.gather(dim=0, index=ix.squeeze(1))
+                    else:
+                        ix = space_ixs.gather(dim=0, index=ix.squeeze(1))
+
+                    debug("first sample ix:", ix)
+                    debug("first sample logprob:", torch.log2(sample_prob))
+                    debug("curr log prob:", curr_log_prob)
+                    #debug("sample:", tokenizer.convert_ids_to_tokens(ix), "prob:", sample_prob)
+
                     output = model(
-                        input_ids=next_id,
-                        past_key_values=DynamicCache.from_legacy_cache(prefix_kv), use_cache=True
-                    )
-                else:
-                    output = model(
-                        input_ids=next_id,
+                        input_ids=ix.unsqueeze(1),
                         past_key_values=DynamicCache.from_legacy_cache(master_kv), use_cache=True
                     )
-                master_kv = output.past_key_values
-                    
-                if not word_final[i]: continue
-
-                curr_log_prob = torch.zeros(NUM_SAMPLES)
-                logits = output.logits.squeeze(dim=1)
-
-                # GPT2 is not trained to put the initial whitespace
-                # on the token immediately after BOS
-                if ids[i] == bos_id:
-                    first_logits = logits[:, subword_ixs]
-                    first_probs = softmax(first_logits)
-
-                # all words coming after a word other than BOS will start
-                # with whitespace
-                else:
-                    #printDebug("logits shape:", logits.shape)
-                    #temp_sm = softmax(logits)
-                    #printDebug("top10:", temp_sm.topk(10))
-                    first_logits = logits[:, space_ixs]
-                    first_probs = softmax(first_logits)
-
-#                topk = first_probs.topk(10, dim=1)[1]
-#                if ids[i] == bos_id:
-#                    topk = subword_ixs[topk]
-#                else:
-#                    topk = space_ixs[topk]
-#                printDebug("topk next tokens (after ix conversion):", topk)
-
-                ix = torch.multinomial(first_probs, 1)
-                # dim: batch
-                sample_prob = first_probs.gather(dim=1, index=ix).squeeze(dim=1)
-                curr_log_prob += torch.log2(sample_prob)
-                # indices should be relative to the whole vocabulary
-                if ids[i] == bos_id:
-                    ix = subword_ixs.gather(dim=0, index=ix.squeeze(1))
-                else:
-                    ix = space_ixs.gather(dim=0, index=ix.squeeze(1))
-
-                printDebug("first sample ix:", ix)
-                printDebug("first sample logprob:", torch.log2(sample_prob))
-                printDebug("curr log prob:", curr_log_prob)
-                #printDebug("sample:", tokenizer.convert_ids_to_tokens(ix), "prob:", sample_prob)
-
-                output = model(
-                    input_ids=ix.unsqueeze(1),
-                    past_key_values=DynamicCache.from_legacy_cache(master_kv), use_cache=True
-                )
-                # fork the kv cache from the main thread that processes
-                # the input sequence
-                sample_kv = output.past_key_values
-                logits = output.logits.squeeze(1)
-                probs = softmax(logits)
-
-                # for subsequent sampling steps, options are subword tokens
-                # or EOW. EOW sums over all space tokens
-                # dim: sample x subwordV
-                subword_probs = probs[:, subword_ixs]
-                # dim: sample x spaceV
-                space_probs = probs[:, space_ixs]
-                # dim: sample x 1
-                eow_prob = torch.sum(space_probs, dim=1, keepdim=True)
-                probs = torch.cat([subword_probs, eow_prob], dim=1)
-                # TODO convert ix to index among all tokens, not just subwords
-                ix = torch.multinomial(probs, 1)
-
-                sample_prob = probs.gather(dim=1, index=ix).squeeze(dim=1)
-                curr_log_prob += torch.log2(sample_prob)
-                still_going = (ix.squeeze(1) < len(subword_ixs))
-
-                is_subword = (ix < len(subword_ixs))
-                is_eow = (ix == len(subword_ixs))
-                ix_filtered = ix * is_subword
-                ix = subword_ixs.gather(dim=0, index=ix_filtered.squeeze(1)).unsqueeze(1)
-                ix_filtered = ix * is_subword
-                eow = torch.full((NUM_SAMPLES, 1), EOW_IX)
-                eow_filler = is_eow * eow
-                ix = ix_filtered + eow_filler
-
-                printDebug("next sampled ix:", ix)
-                printDebug("next sample logprob:", torch.log2(sample_prob))
-                printDebug("curr log probs:", curr_log_prob)
-                printDebug("still going:", still_going)
-                printDebug("log probs x still going:", curr_log_prob * still_going)
-
-
-                # two subword tokens have been sampled so far
-                iterations = 2
-                while still_going.sum() > 0 and iterations < MAX_ITERATIONS:
-                    printDebug("Current iteration:", iterations)
-                    output = model(
-                        input_ids=ix,
-                        past_key_values=DynamicCache.from_legacy_cache(sample_kv), use_cache=True
-                    )
+                    # fork the kv cache from the main thread that processes
+                    # the input sequence
                     sample_kv = output.past_key_values
                     logits = output.logits.squeeze(1)
                     probs = softmax(logits)
@@ -362,45 +328,94 @@ def main():
                     # dim: sample x 1
                     eow_prob = torch.sum(space_probs, dim=1, keepdim=True)
                     probs = torch.cat([subword_probs, eow_prob], dim=1)
-                    # TODO add tensor tracking the step at which each sample finishes
+                    # TODO convert ix to index among all tokens, not just subwords
                     ix = torch.multinomial(probs, 1)
+
                     sample_prob = probs.gather(dim=1, index=ix).squeeze(dim=1)
-                    curr_log_prob += torch.log2(sample_prob)*still_going
-                    still_going = (still_going * (ix.squeeze(1) < len(subword_ixs)))
+                    curr_log_prob += torch.log2(sample_prob)
+                    still_going = (ix.squeeze(1) < len(subword_ixs))
 
                     is_subword = (ix < len(subword_ixs))
                     is_eow = (ix == len(subword_ixs))
                     ix_filtered = ix * is_subword
                     ix = subword_ixs.gather(dim=0, index=ix_filtered.squeeze(1)).unsqueeze(1)
                     ix_filtered = ix * is_subword
-                    eow = torch.full((NUM_SAMPLES, 1), EOW_IX)
+                    eow = torch.full((SAMPLES_PER_BATCH, 1), EOW_IX)
                     eow_filler = is_eow * eow
                     ix = ix_filtered + eow_filler
 
-                    printDebug("next sampled ix:", ix)
-                    printDebug("next sample logprob:", torch.log2(sample_prob))
-                    printDebug("curr log probs:", curr_log_prob)
-                    printDebug("still going:", still_going)
-                    printDebug("log probs x still going:", curr_log_prob * still_going)
+                    debug("next sampled ix:", ix)
+                    debug("next sample logprob:", torch.log2(sample_prob))
+                    debug("curr log probs:", curr_log_prob)
+                    debug("still going:", still_going)
+                    debug("log probs x still going:", curr_log_prob * still_going)
 
-                    iterations += 1
-                    if iterations == MAX_ITERATIONS:
-                        printDebug("NOTE: max iterations reached")
-                # end loop over multi-token continuations
-                printDebug("log probs for sampled tokens:", curr_log_prob)
-                curr_entropy  = -torch.mean(curr_log_prob, dim=0).item()
-                batch_entropies.append(curr_entropy)
-            # end loop over tokens in batch
-            printDebug("batch entropies:")
-            printDebug(batch_entropies)
-            story_entropies.extend(batch_entropies)
-        # end loop over batches in story
-        printDebug("story entropies:", story_entropies)
 
-        printDebug("batch ids:")
-        printDebug(ids[start_ix:])
-        printDebug("batch word_final:")
-        printDebug(word_final[start_ix:])
+                    # two subword tokens have been sampled so far
+                    iterations = 2
+                    while still_going.sum() > 0 and iterations < MAX_ITERATIONS:
+                        debug("Current iteration:", iterations)
+                        output = model(
+                            input_ids=ix,
+                            past_key_values=DynamicCache.from_legacy_cache(sample_kv), use_cache=True
+                        )
+                        sample_kv = output.past_key_values
+                        logits = output.logits.squeeze(1)
+                        probs = softmax(logits)
+
+                        # for subsequent sampling steps, options are subword tokens
+                        # or EOW. EOW sums over all space tokens
+                        # dim: sample x subwordV
+                        subword_probs = probs[:, subword_ixs]
+                        # dim: sample x spaceV
+                        space_probs = probs[:, space_ixs]
+                        # dim: sample x 1
+                        eow_prob = torch.sum(space_probs, dim=1, keepdim=True)
+                        probs = torch.cat([subword_probs, eow_prob], dim=1)
+                        # TODO add tensor tracking the step at which each sample finishes
+                        ix = torch.multinomial(probs, 1)
+                        sample_prob = probs.gather(dim=1, index=ix).squeeze(dim=1)
+                        curr_log_prob += torch.log2(sample_prob)*still_going
+                        still_going = (still_going * (ix.squeeze(1) < len(subword_ixs)))
+
+                        is_subword = (ix < len(subword_ixs))
+                        is_eow = (ix == len(subword_ixs))
+                        ix_filtered = ix * is_subword
+                        ix = subword_ixs.gather(dim=0, index=ix_filtered.squeeze(1)).unsqueeze(1)
+                        ix_filtered = ix * is_subword
+                        eow = torch.full((SAMPLES_PER_BATCH, 1), EOW_IX)
+                        eow_filler = is_eow * eow
+                        ix = ix_filtered + eow_filler
+
+                        debug("next sampled ix:", ix)
+                        debug("next sample logprob:", torch.log2(sample_prob))
+                        debug("curr log probs:", curr_log_prob)
+                        debug("still going:", still_going)
+                        debug("log probs x still going:", curr_log_prob * still_going)
+
+                        iterations += 1
+                        if iterations == MAX_ITERATIONS:
+                            debug("NOTE: max iterations reached")
+                    # end loop over multi-token continuations
+                    debug("log probs for sampled tokens:", curr_log_prob)
+                    batch_log_probs.append(curr_log_prob.tolist())
+                    #curr_entropy  = -torch.mean(curr_log_prob, dim=0).item()
+                    #window_entropies.append(curr_entropy)
+                # end loop over tokens in batch
+                debug("final batch log probs:", batch_log_probs)
+                batch_log_probs = torch.tensor(batch_log_probs)
+                debug("converted:", batch_log_probs)
+                window_log_probs = torch.cat([window_log_probs, batch_log_probs], dim=1)
+            # end loop over batches for a window
+            window_entropies = -torch.mean(window_log_probs, dim=1)
+            story_entropies.extend(window_entropies.tolist())
+        # end loop over windows in a story
+        debug("story entropies:", story_entropies)
+
+        debug("window ids:")
+        debug(ids[start_ix:])
+        debug("window word_final:")
+        debug(word_final[start_ix:])
         print_entropies(story_entropies, story_ids, story_word_final, tokenizer)
 
 
