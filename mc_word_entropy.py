@@ -19,6 +19,7 @@ each with checkpoints specified by training steps:
 "step1", "step2", "step4", ..., "step142000", "step143000"
 """
 
+import argparse
 import sys
 import torch
 from transformers import (
@@ -29,11 +30,11 @@ from transformers import (
     DynamicCache
 )
 
-NUM_SAMPLES = 128
-SAMPLES_PER_BATCH = 128
-DEBUG = True
+#NUM_SAMPLES = 128
+#SAMPLES_PER_BATCH = 128
+DEBUG = False
 EOW_IX = 50255
-MAX_ITERATIONS = 20
+#MAX_ITERATIONS = 20
 
 
 class Window:
@@ -111,9 +112,14 @@ def print_entropies(entropies, ids, word_final, tokenizer):
             curr_word_ix += 1
 
 
-def main():
-    stories = generate_stories(sys.argv[1])
-    model_variant = sys.argv[2].split("/")[-1]
+def main(args):
+    stories = generate_stories(args.sentitems)
+    model = args.model
+    model_variant = model.split("/")[-1]
+    num_samples = args.samples
+    samples_per_batch = args.samplesPerBatch
+    max_iterations = args.maxIter
+    context_size = args.contextSize
 
     if "gpt-neox" in model_variant:
         tokenizer = GPTNeoXTokenizerFast.from_pretrained(sys.argv[2])
@@ -136,6 +142,9 @@ def main():
     model.eval()
     softmax = torch.nn.Softmax(dim=-1)
     ctx_size = model.config.max_position_embeddings
+    if context_size is not None:
+        assert context_size < ctx_size
+        ctx_size = context_size
     #ctx_size = 16
     debug("ctx_size:", ctx_size)
     bos_id = model.config.bos_token_id
@@ -164,8 +173,8 @@ def main():
                 story_word_final.append(False)
         story_word_final.append(True)
 
-        debug(story_ids)
-        debug(story_word_final)
+        debug("story_ids[:20]:", story_ids[:20])
+        debug("story_word_final[:20]:", story_word_final[:20])
 
         # split ids into subsequences, each of length <= 1/2 * ctx_size.
         # make sure that splits don't land mid-word
@@ -175,7 +184,9 @@ def main():
         curr_start_ix = 0
         curr_end_ix = 0
         for ix, is_final in enumerate(story_word_final):
-            if ix-curr_start_ix == ctx_size/2:
+            # subtract max_iterations so context size isn't exceeded when
+            # sampling last token in a window
+            if ix-curr_start_ix == ctx_size/2 - max_iterations:
                 curr_start_ix = curr_end_ix + 1
                 half_window_start_ixs.append(curr_start_ix)
             elif is_final:
@@ -186,7 +197,7 @@ def main():
         if len(half_window_start_ixs) == 2:
             half_window_start_ixs.append(len(story_word_final))
 
-        debug(half_window_start_ixs)
+        debug("half window start ixs [:20]:", half_window_start_ixs[:20])
 
         windows = list()
         for ix in range(len(half_window_start_ixs)-2):
@@ -205,8 +216,8 @@ def main():
                 word_final=story_word_final[w_start:w_end],
                 start_ix=start_ix
             )
+            debug("adding window. start: {}, end: {}".format(w_start, w_end))
             windows.append(window)
-            debug(window)
         
         story_entropies = list()
         for window in windows:
@@ -216,25 +227,26 @@ def main():
             start_ix = window.start_ix
 
             debug(f"\n==== NEW WINDOW ====")
-            debug("ids", ids)
-            debug("attn", attn)
-            debug("word_final", word_final)
+            debug("ids[:20]", ids[:20])
+            debug("attn[:20]", attn[:20])
+            debug("word_final[:20]", word_final[:20])
             debug("start_ix", start_ix)
 
-            num_words = sum(word_final)
+            # number of words in the latter part of the window
+            num_words = sum(word_final[start_ix:])
             window_log_probs = torch.empty(size=(num_words, 0))
 
             # just being lazy with this; wouldn't be hard to allow
             # unequal batches
-            assert NUM_SAMPLES % SAMPLES_PER_BATCH == 0
-            num_batches = NUM_SAMPLES // SAMPLES_PER_BATCH
+            assert num_samples % samples_per_batch == 0
+            num_batches = num_samples // samples_per_batch
             for batch in range(num_batches):
                 debug(f"\n==== NEW BATCH ====")
                 batch_log_probs = list()
                 # process tokens from the first half-window
                 if start_ix > 0:
-                    prefix_id = torch.tensor(ids[:start_ix]).repeat(SAMPLES_PER_BATCH, 1)
-                    prefix_attn = torch.tensor(attn[:start_ix]).repeat(SAMPLES_PER_BATCH, 1)
+                    prefix_id = torch.tensor(ids[:start_ix]).repeat(samples_per_batch, 1)
+                    prefix_attn = torch.tensor(attn[:start_ix]).repeat(samples_per_batch, 1)
                     debug("prefix id:", prefix_id)
                     prefix_output = model(
                         input_ids=prefix_id,
@@ -244,12 +256,13 @@ def main():
                     # samples fork from prefix_kv
                     prefix_kv = prefix_output.past_key_values
 
+                debug("done with prefix; starting the rest of the window. start_ix: {} len(ids): {}".format(start_ix, len(ids)))
                 for i in range(start_ix, len(ids)):
-                    next_id = torch.tensor(ids[i:i+1]).repeat(SAMPLES_PER_BATCH, 1)
+                    next_id = torch.tensor(ids[i:i+1]).repeat(samples_per_batch, 1)
                     debug("\nnext id:", next_id)
                     debug("next token:", tokenizer.convert_ids_to_tokens(next_id))
                     if i == 0:
-                        attn_mask = torch.tensor(attn[:1]).repeat(SAMPLES_PER_BATCH, 1)
+                        attn_mask = torch.tensor(attn[:1]).repeat(samples_per_batch, 1)
                         output = model(
                             input_ids=next_id,
                             attention_mask=attn_mask,
@@ -269,7 +282,7 @@ def main():
                         
                     if not word_final[i]: continue
 
-                    curr_log_prob = torch.zeros(SAMPLES_PER_BATCH)
+                    curr_log_prob = torch.zeros(samples_per_batch)
                     logits = output.logits.squeeze(dim=1)
 
                     # GPT2 is not trained to put the initial whitespace
@@ -340,7 +353,7 @@ def main():
                     ix_filtered = ix * is_subword
                     ix = subword_ixs.gather(dim=0, index=ix_filtered.squeeze(1)).unsqueeze(1)
                     ix_filtered = ix * is_subword
-                    eow = torch.full((SAMPLES_PER_BATCH, 1), EOW_IX)
+                    eow = torch.full((samples_per_batch, 1), EOW_IX)
                     eow_filler = is_eow * eow
                     ix = ix_filtered + eow_filler
 
@@ -350,10 +363,9 @@ def main():
                     debug("still going:", still_going)
                     debug("log probs x still going:", curr_log_prob * still_going)
 
-
                     # two subword tokens have been sampled so far
                     iterations = 2
-                    while still_going.sum() > 0 and iterations < MAX_ITERATIONS:
+                    while still_going.sum() > 0 and iterations < max_iterations:
                         debug("Current iteration:", iterations)
                         output = model(
                             input_ids=ix,
@@ -383,7 +395,7 @@ def main():
                         ix_filtered = ix * is_subword
                         ix = subword_ixs.gather(dim=0, index=ix_filtered.squeeze(1)).unsqueeze(1)
                         ix_filtered = ix * is_subword
-                        eow = torch.full((SAMPLES_PER_BATCH, 1), EOW_IX)
+                        eow = torch.full((samples_per_batch, 1), EOW_IX)
                         eow_filler = is_eow * eow
                         ix = ix_filtered + eow_filler
 
@@ -394,7 +406,7 @@ def main():
                         debug("log probs x still going:", curr_log_prob * still_going)
 
                         iterations += 1
-                        if iterations == MAX_ITERATIONS:
+                        if iterations == max_iterations:
                             debug("NOTE: max iterations reached")
                     # end loop over multi-token continuations
                     debug("log probs for sampled tokens:", curr_log_prob)
@@ -402,7 +414,7 @@ def main():
                     #curr_entropy  = -torch.mean(curr_log_prob, dim=0).item()
                     #window_entropies.append(curr_entropy)
                 # end loop over tokens in batch
-                debug("final batch log probs:", batch_log_probs)
+                debug("final batch log probs[:20]:", batch_log_probs[:20])
                 batch_log_probs = torch.tensor(batch_log_probs)
                 debug("converted:", batch_log_probs)
                 window_log_probs = torch.cat([window_log_probs, batch_log_probs], dim=1)
@@ -410,14 +422,22 @@ def main():
             window_entropies = -torch.mean(window_log_probs, dim=1)
             story_entropies.extend(window_entropies.tolist())
         # end loop over windows in a story
-        debug("story entropies:", story_entropies)
+        debug("story entropies[:20]:", story_entropies[:20])
 
-        debug("window ids:")
-        debug(ids[start_ix:])
-        debug("window word_final:")
-        debug(word_final[start_ix:])
+        debug("window ids [:20]:")
+        debug(ids[start_ix:][:20])
+        debug("window word_final [:20]:")
+        debug(word_final[start_ix:][:20])
         print_entropies(story_entropies, story_ids, story_word_final, tokenizer)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("sentitems")
+    parser.add_argument("model")
+    parser.add_argument("--samples", "-s", type=int, default=64)
+    parser.add_argument("--samplesPerBatch", "-b", type=int, default=2)
+    parser.add_argument("--maxIter", "-m", type=int, default=20)
+    parser.add_argument("--contextSize", "-c", type=int, default=None)
+    args = parser.parse_args()
+    main(args)
