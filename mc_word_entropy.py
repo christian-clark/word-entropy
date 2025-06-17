@@ -30,12 +30,9 @@ from transformers import (
     DynamicCache
 )
 
-#NUM_SAMPLES = 128
-#SAMPLES_PER_BATCH = 128
 DEBUG = False
+# arbitrarily chosen as a placeholder index
 EOW_IX = 50255
-#MAX_ITERATIONS = 20
-
 
 class Window:
     def __init__(self, input_ids, attn_mask, word_final, start_ix):
