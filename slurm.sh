@@ -17,10 +17,13 @@
 
 set -e
 
-#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_unrestricted_renyi.py
-SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_renyi.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/old.first_token_entropy_restricted.py
+SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_restricted.py
 INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/test.sentitems
-OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/renyi/delmeR
+#INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/naturalstories.sentitems
+OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/testnewrnew
+#OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/testnewrold
+#OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/nsdelme
 MODEL=gpt2
 
 
@@ -38,12 +41,12 @@ python3 $SCRIPT $INPUT $MODEL > $OUTPUT
 #python3 $SCRIPT $INPUT $MODEL -s $SAMPLES -b $SAMPLES_PER_BATCH -c 32 > $OUTPUT
 date
 
-#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_unrestricted_renyi.py
 #SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_restricted.py
-#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_renyi.py
-#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_unrestricted.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_renyi_entropy_restricted.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_renyi_entropy_unrestricted.py
 #SCRIPT=/users/PAS2157/ceclark/git/word-entropy/mc_word_entropy.py
-#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/mc_word_entropy_renyi.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/mc_word_renyi_entropy.py
 #SCRIPT=/users/PAS2157/ceclark/git/word-entropy/sample_word_entropy.py
 
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/dundee.sentitems
