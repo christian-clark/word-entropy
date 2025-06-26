@@ -180,6 +180,8 @@ def main():
         start_idx = batch.start_idx
         is_first_batch = batch.is_first_batch
 
+        debug("batch input:", batch_input.input_ids)
+
         with torch.no_grad():
             model_output = model(**batch_input)
 
@@ -191,6 +193,7 @@ def main():
             bos_logits = logits[0]
             # first token after BOS is a subword_ix, not a space_ix
             bos_logits = bos_logits[subword_ixs]
+            debug("bos logits:", bos_logits)
             bos_probs = softmax(bos_logits)
             bos_log_probs = torch.log2(bos_probs)
             bos_entropy = torch.sum(-bos_probs*bos_log_probs, dim=0, keepdim=True)
@@ -207,6 +210,7 @@ def main():
             log_probs = torch.log2(probs)
             entropies = torch.sum(-probs*log_probs, dim=1)
 
+        debug("entropies:", entropies)
         curr_w = ""
         curr_entropy = -1
         for i in range(start_idx, len(toks)):

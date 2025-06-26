@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A PAS1200
-#SBATCH --time=3:00:00
+#SBATCH --time=1:00:00
 #SBATCH --ntasks=24
-#SBATCH --mem=350gb
+#SBATCH --mem=100gb
 
 # good enough for first-token entropy
 ##SBATCH --time=1:00:00
@@ -17,10 +17,15 @@
 
 set -e
 
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/old.first_token_entropy_restricted.py
 SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_restricted.py
-INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/dundee.sentitems
-OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/dundee.firsttokenrest.entropy
+INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/test.sentitems
+#INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/naturalstories.sentitems
+OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/testnewrnew
+#OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/testnewrold
+#OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/nsdelme
 MODEL=gpt2
+
 
 SAMPLES=64
 SAMPLES_PER_BATCH=8
@@ -31,15 +36,19 @@ conda activate transformers
 
 set -x
 date
-#python3 $SCRIPT $INPUT $MODEL > $OUTPUT
-python3 $SCRIPT $INPUT $MODEL -s $SAMPLES -b $SAMPLES_PER_BATCH > $OUTPUT
+#python3 $SCRIPT $INPUT $MODEL -s $SAMPLES -b $SAMPLES_PER_BATCH > $OUTPUT
+python3 $SCRIPT $INPUT $MODEL > $OUTPUT
 #python3 $SCRIPT $INPUT $MODEL -s $SAMPLES -b $SAMPLES_PER_BATCH -c 32 > $OUTPUT
 date
 
 #SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_restricted.py
-#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_entropy_unrestricted.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_renyi_entropy_restricted.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/first_token_renyi_entropy_unrestricted.py
 #SCRIPT=/users/PAS2157/ceclark/git/word-entropy/mc_word_entropy.py
-#i=6b
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/mc_word_renyi_entropy.py
+#SCRIPT=/users/PAS2157/ceclark/git/word-entropy/sample_word_entropy.py
+
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/dundee.sentitems
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/dundee.${i}of8.sentitems
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/dundee.1of8.sentitems
@@ -56,10 +65,13 @@ date
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/naturalstories.first10.sentitems
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/naturalstories.first1.sentitems
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/naturalstories.sentitems
+#INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/naturalstories.1of2.sentitems
+#INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/naturalstories.2of2.sentitems
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/test2.sentitems
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/test3.sentitems
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/test_multiple.sentitems
 #INPUT=/users/PAS2157/ceclark/git/word-entropy/inputs/test.sentitems
+
 #OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/naturalstories.s64.b8.entropy
 #OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/naturalstories.first100.s16.b8.entropy
 #OUTPUT=/users/PAS2157/ceclark/git/word-entropy/outputs/naturalstories.first44.s24.entropy
