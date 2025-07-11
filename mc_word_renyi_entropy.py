@@ -30,6 +30,8 @@ from transformers import (
     DynamicCache
 )
 
+torch.manual_seed(43)
+
 DEBUG = False
 # arbitrarily chosen as a placeholder index
 EOW_IX = 50255
@@ -288,7 +290,8 @@ def main(args):
                     # on the token immediately after BOS
                     if ids[i] == bos_id:
                         first_logits = logits[:, subword_ixs]
-                        first_probs = softmax(first_logits)
+                        #first_probs = softmax(first_logits)
+                        first_probs = softmax(first_logits.double())
 
                     # all words coming after a word other than BOS will start
                     # with whitespace
@@ -297,7 +300,8 @@ def main(args):
                         #temp_sm = softmax(logits)
                         #debug("top10:", temp_sm.topk(10))
                         first_logits = logits[:, space_ixs]
-                        first_probs = softmax(first_logits)
+                        #first_probs = softmax(first_logits)
+                        first_probs = softmax(first_logits.double())
 
     #                topk = first_probs.topk(10, dim=1)[1]
     #                if ids[i] == bos_id:
@@ -329,7 +333,8 @@ def main(args):
                     # the input sequence
                     sample_kv = output.past_key_values
                     logits = output.logits.squeeze(1)
-                    probs = softmax(logits)
+                    #probs = softmax(logits)
+                    probs = softmax(logits.double())
 
                     # for subsequent sampling steps, options are subword tokens
                     # or EOW. EOW sums over all space tokens
@@ -372,7 +377,8 @@ def main(args):
                         )
                         sample_kv = output.past_key_values
                         logits = output.logits.squeeze(1)
-                        probs = softmax(logits)
+                        #probs = softmax(logits)
+                        probs = softmax(logits.double())
 
                         # for subsequent sampling steps, options are subword tokens
                         # or EOW. EOW sums over all space tokens
@@ -424,7 +430,9 @@ def main(args):
             # MC estimate of Renyi entropy for alpha != 1
             else:
                 # raw probabilities to alpha-1 power
-                x = torch.pow(2**window_log_probs, alpha-1)
+                #x = torch.pow(2**window_log_probs, alpha-1)
+                x = torch.pow(2**window_log_probs.double(), alpha-1)
+                #x = 2 ** (alpha-1)*window_log_probs
                 debug("story entropies[:20]:", story_entropies[:20])
                 x = torch.sum(x, dim=1) / num_samples
                 window_entropies = torch.log2(x) / (1-alpha)
