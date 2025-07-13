@@ -465,7 +465,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("sentitems")
     parser.add_argument("model")
-    parser.add_argument("--samples", "-s", type=int, default=128)
+    parser.add_argument("--samples", "-s", type=int, default=64)
     parser.add_argument("--samplesPerBatch", "-b", type=int, default=2)
     parser.add_argument("--maxIter", "-m", type=int, default=20)
     parser.add_argument("--contextSize", "-c", type=int, default=None)
