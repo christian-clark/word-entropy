@@ -138,10 +138,8 @@ def main(args):
         torch.backends.cudnn.benchmark = False
 
     tokenizer = AutoTokenizer.from_pretrained(sys.argv[2])
-    if "bne" in model_variant:
-        vocab_size = 50261
-    else:
-        vocab_size = tokenizer.vocab_size
+    # some multilingual models may require hard-coding this
+    vocab_size = tokenizer.vocab_size
     debug(vocab_size)
     space_ixs, subword_ixs = get_space_subword_idx(tokenizer, vocab_size)
     if gpu:
@@ -473,6 +471,6 @@ if __name__ == "__main__":
     parser.add_argument("--maxIter", "-m", type=int, default=20)
     parser.add_argument("--contextSize", "-c", type=int, default=None)
     parser.add_argument("--seed", "-d", type=int, default=None)
-    parser.add_argument("--gpu", "-g", action="store_true")
+    parser.add_argument("--gpu", "-g", action="store_true", help="use GPU")
     args = parser.parse_args()
     main(args)

@@ -22,7 +22,7 @@ each with checkpoints specified by training steps:
 import argparse
 import sys
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, GPTNeoXTokenizerFast, GPTNeoXForCausalLM
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
 
 
 DEBUG = False
@@ -60,7 +60,7 @@ def generate_stories(fn):
     return stories
 
 
-def get_space_subword_idx(tokenizer):
+def get_space_subword_idx(tokenizer, vocab_size):
     space_idx = []
     subword_idx = []
 
@@ -72,44 +72,47 @@ def get_space_subword_idx(tokenizer):
         inverted_vocab[idx] = token
         
     for idx in range(len(inverted_vocab)):
-        token = inverted_vocab[idx]
-        if token.startswith("Ġ"):
-            space_idx.append(idx)
-        else:
-            subword_idx.append(idx)
+        # some non-English models have junk vocab idx that is never used
+        # which will cause an indexing error if not filtered out
+        if idx <= vocab_size-1:
+            token = inverted_vocab[idx]
+            if token.startswith("Ġ"):
+                space_idx.append(idx)
+            else:
+                subword_idx.append(idx)
 
     return torch.tensor(space_idx), torch.tensor(subword_idx)
 
 
 def main(args):
+    print(args, file=sys.stderr)
     stories = generate_stories(args.sentitems)
     model_variant = args.model.split("/")[-1]
+    #os.environ["HF_HOME"] = "<your_path_here>"
     unrestricted = args.unrestricted
     alpha = args.alpha
+    gpu = args.gpu
 
-    if "gpt-neox" in model_variant:
-        tokenizer = GPTNeoXTokenizerFast.from_pretrained(sys.argv[2])
-    elif "gpt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2])
-    elif "opt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2])
-    elif "pythia" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], revision=sys.argv[3], cache_dir=f"hf_models/{model_variant}_{sys.argv[3]}")
-
-    else:
-        raise ValueError("Unsupported LLM variant")
-
+    tokenizer = AutoTokenizer.from_pretrained(sys.argv[2])
+    # some multilingual models may require hard-coding this
+    vocab_size = tokenizer.vocab_size
+    space_ixs, subword_ixs = get_space_subword_idx(tokenizer, vocab_size)
+    config = AutoConfig.from_pretrained(sys.argv[2])
     if "pythia" in model_variant:
-        model = GPTNeoXForCausalLM.from_pretrained(sys.argv[2], revision=sys.argv[3], cache_dir=f"hf_models/{model_variant}_{sys.argv[3]}")
+        model = AutoModelForCausalLM.from_pretrained(sys.argv[2], revision=sys.argv[3])
     else:
         model = AutoModelForCausalLM.from_pretrained(sys.argv[2])
-
-    # model.cuda()
+    if gpu:
+        model.cuda()
     model.eval()
     softmax = torch.nn.Softmax(dim=-1)
-    ctx_size = model.config.max_position_embeddings
-    bos_id = model.config.bos_token_id
-    space_ixs, subword_ixs = get_space_subword_idx(tokenizer)
+
+    # some multilingual models may require hard-coding this
+    ctx_size = config.max_position_embeddings
+
+    bos_id = config.bos_token_id
+    # some multilingual models may require this to be false
+    prepend_bos = True
 
     print("word entropy")
     for story in stories:
@@ -117,10 +120,15 @@ def main(args):
         ids = tokenizer_output.input_ids
         attn = tokenizer_output.attention_mask
 
-        # these tokenizers do not append bos_id by default
-        if "gpt" in model_variant or "pythia" in model_variant:
+        if prepend_bos:
             ids = [bos_id] + ids
             attn = [1] + attn
+
+        if not prepend_bos and "bne" not in model_variant:
+            first_tok = tokenizer.convert_ids_to_tokens([ids[0]])
+            first_tok = tokenizer.convert_tokens_to_string(first_tok).replace(" ", "")
+            print(f"adding: {first_tok}, 100.", file=sys.stderr)
+            print(first_tok, 100.)
 
         # call initial BOS word-initial, as well as the token after
         # token right after BOS wil be in subword_ixs but is still word
@@ -185,6 +193,9 @@ def main(args):
             attn_mask = torch.tensor(window.attn_mask).unsqueeze(0)
             word_initial = window.word_initial
             start_ix = window.start_ix
+            if gpu:
+                input_ids = input_ids.cuda()
+                attn_mask = attn_mask.cuda()
             model_output = model(
                 input_ids=input_ids,
                 attention_mask=attn_mask
@@ -195,7 +206,7 @@ def main(args):
             logits = model_output.logits.squeeze(0)
             if unrestricted:
                 # shannon entropy
-                probs = softmax(logits)
+                probs = softmax(logits.double())
                 if alpha == 1:
                     log_probs = torch.log2(probs)
                     entropies = torch.sum(-probs*log_probs, dim=1)
@@ -207,7 +218,7 @@ def main(args):
                     bos_logits = logits[0]
                     # first token after BOS is a subword_ix, not a space_ix
                     bos_logits = bos_logits[subword_ixs]
-                    bos_probs = softmax(bos_logits)
+                    bos_probs = softmax(bos_logits.double())
                     # shannon entropy
                     if alpha == 1:
                         bos_log_probs = torch.log2(bos_probs)
@@ -216,7 +227,7 @@ def main(args):
                         x = torch.sum(bos_probs**alpha, dim=0, keepdim=True)
                         bos_entropy = torch.log2(x) / (1-alpha)
                     logits = logits[1:, space_ixs]
-                    probs = softmax(logits)
+                    probs = softmax(logits.double())
                     if alpha == 1:
                         log_probs = torch.log2(probs)
                         entropies = torch.sum(-probs*log_probs, dim=1)
@@ -227,7 +238,7 @@ def main(args):
                 else:
                     # ignore tokens that aren't the beginning of a new word
                     logits = logits[:, space_ixs]
-                    probs = softmax(logits)
+                    probs = softmax(logits.double())
                     if alpha == 1:
                         log_probs = torch.log2(probs)
                         entropies = torch.sum(-probs*log_probs, dim=1)
@@ -254,5 +265,6 @@ if __name__ == "__main__":
         help="take entropy over full vocab instead of space-initial tokens")
     parser.add_argument("-a", "--alpha", type=float, default=1.,
         help="alpha parameter for renyi entropy; alpha=1 gives shannon entropy")
+    parser.add_argument("--gpu", "-g", action="store_true", help="use GPU")
     args = parser.parse_args()
     main(args)
