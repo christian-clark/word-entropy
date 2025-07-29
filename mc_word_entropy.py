@@ -25,11 +25,11 @@ import torch
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
-    GPTNeoXTokenizerFast,
-    GPTNeoXForCausalLM,
+    AutoConfig,
     DynamicCache
 )
 
+# DEBUG = True
 DEBUG = False
 # arbitrarily chosen as a placeholder index
 EOW_IX = 50255
@@ -53,7 +53,7 @@ def debug(*args, **kwargs):
         print("DEBUG:", *args, **kwargs, file=sys.stderr)
 
 
-def get_space_subword_idx(tokenizer):
+def get_space_subword_idx(tokenizer, vocab_size):
     space_idx = []
     subword_idx = []
 
@@ -65,11 +65,14 @@ def get_space_subword_idx(tokenizer):
         inverted_vocab[idx] = token
         
     for idx in range(len(inverted_vocab)):
-        token = inverted_vocab[idx]
-        if token.startswith("Ġ"):
-            space_idx.append(idx)
-        else:
-            subword_idx.append(idx)
+        # some non-English models have junk vocab idx that is never used
+        # which will cause an indexing error if not filtered out
+        if idx <= vocab_size-1:
+            token = inverted_vocab[idx]
+            if token.startswith("Ġ"):
+                space_idx.append(idx)
+            else:
+                subword_idx.append(idx)
 
     return torch.tensor(space_idx), torch.tensor(subword_idx)
 
@@ -93,10 +96,14 @@ def generate_stories(fn):
     return stories
 
 
-def print_entropies(entropies, ids, word_final, tokenizer):
+def print_entropies(entropies, ids, word_final, tokenizer, bos_id):
     assert len(ids) == len(word_final)
     curr_toks = list()
     curr_word_ix = 0
+    if ids[0] != bos_id:
+        first_tok = tokenizer.convert_ids_to_tokens([ids[0]])
+        first_tok = tokenizer.convert_tokens_to_string(first_tok).replace(" ", "")
+        print(first_tok, 100.)
     # skip initial id and word_final, which are for BOS token
     for id, final in zip(ids[1:], word_final[1:]):
         tok = tokenizer.convert_ids_to_tokens(id)
@@ -110,53 +117,65 @@ def print_entropies(entropies, ids, word_final, tokenizer):
 
 
 def main(args):
+
+    if args.seed:
+        torch.manual_seed(args.seed)
     stories = generate_stories(args.sentitems)
     model = args.model
     model_variant = model.split("/")[-1]
+    alpha = args.alpha
     num_samples = args.samples
     samples_per_batch = args.samplesPerBatch
     max_iterations = args.maxIter
     context_size = args.contextSize
+    #os.environ["HF_HOME"] = "<your_path_here>"
+    gpu = args.gpu
+    if gpu:
+        if args.seed:
+            torch.cuda.manual_seed(args.seed)
+            torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
-    if "gpt-neox" in model_variant:
-        tokenizer = GPTNeoXTokenizerFast.from_pretrained(sys.argv[2])
-    elif "gpt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2])
-    elif "opt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2])
-    elif "pythia" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], revision=sys.argv[3], cache_dir=f"hf_models/{model_variant}_{sys.argv[3]}")
-
+    tokenizer = AutoTokenizer.from_pretrained(sys.argv[2])
+    if "bne" in model_variant:
+        vocab_size = 50261
     else:
-        raise ValueError("Unsupported LLM variant")
-
+        vocab_size = tokenizer.vocab_size
+    debug(vocab_size)
+    space_ixs, subword_ixs = get_space_subword_idx(tokenizer, vocab_size)
+    if gpu:
+        space_ixs = space_ixs.cuda()
+        subword_ixs = subword_ixs.cuda()
+    config = AutoConfig.from_pretrained(sys.argv[2])
     if "pythia" in model_variant:
-        model = GPTNeoXForCausalLM.from_pretrained(sys.argv[2], revision=sys.argv[3], cache_dir=f"hf_models/{model_variant}_{sys.argv[3]}")
+        model = AutoModelForCausalLM.from_pretrained(sys.argv[2], revision=sys.argv[3])
     else:
         model = AutoModelForCausalLM.from_pretrained(sys.argv[2])
-
-    # model.cuda()
+    if gpu:
+        model.cuda()
     model.eval()
     softmax = torch.nn.Softmax(dim=-1)
-    ctx_size = model.config.max_position_embeddings
+
+    # some multilingual models may require hard-coding this
+    ctx_size = config.max_position_embeddings
+
+    bos_id = config.bos_token_id
+    # some multilingual models may require this to be false
+    prepend_bos = True
+
     if context_size is not None:
         assert context_size < ctx_size
         ctx_size = context_size
-    #ctx_size = 16
     debug("ctx_size:", ctx_size)
-    bos_id = model.config.bos_token_id
-    space_ixs, subword_ixs = get_space_subword_idx(tokenizer)
-
 
     print("word entropy")
     for story in stories:
-        #words.extend(story.split(" "))
         tokenizer_output = tokenizer(story)
         story_ids = tokenizer_output.input_ids
         story_attn = tokenizer_output.attention_mask
 
-        # these tokenizers do not append bos_id by default
-        if "gpt" in model_variant or "pythia" in model_variant:
+        if prepend_bos:
             story_ids = [bos_id] + story_ids
             story_attn = [1] + story_attn
 
@@ -244,6 +263,9 @@ def main(args):
                 if start_ix > 0:
                     prefix_id = torch.tensor(ids[:start_ix]).repeat(samples_per_batch, 1)
                     prefix_attn = torch.tensor(attn[:start_ix]).repeat(samples_per_batch, 1)
+                    if gpu:
+                        prefix_id = prefix_id.cuda()
+                        prefix_attn = prefix_attn.cuda()
                     debug("prefix id:", prefix_id)
                     prefix_output = model(
                         input_ids=prefix_id,
@@ -256,10 +278,14 @@ def main(args):
                 debug("done with prefix; starting the rest of the window. start_ix: {} len(ids): {}".format(start_ix, len(ids)))
                 for i in range(start_ix, len(ids)):
                     next_id = torch.tensor(ids[i:i+1]).repeat(samples_per_batch, 1)
+                    if gpu:
+                        next_id = next_id.cuda()
                     debug("\nnext id:", next_id)
                     debug("next token:", tokenizer.convert_ids_to_tokens(next_id))
                     if i == 0:
                         attn_mask = torch.tensor(attn[:1]).repeat(samples_per_batch, 1)
+                        if gpu:
+                            attn_mask = attn_mask.cuda()
                         output = model(
                             input_ids=next_id,
                             attention_mask=attn_mask,
@@ -280,29 +306,21 @@ def main(args):
                     if not word_final[i]: continue
 
                     curr_log_prob = torch.zeros(samples_per_batch)
+                    if gpu:
+                        curr_log_prob = curr_log_prob.cuda()
                     logits = output.logits.squeeze(dim=1)
 
                     # GPT2 is not trained to put the initial whitespace
                     # on the token immediately after BOS
                     if ids[i] == bos_id:
                         first_logits = logits[:, subword_ixs]
-                        first_probs = softmax(first_logits)
+                        first_probs = softmax(first_logits.double())
 
                     # all words coming after a word other than BOS will start
                     # with whitespace
                     else:
-                        #debug("logits shape:", logits.shape)
-                        #temp_sm = softmax(logits)
-                        #debug("top10:", temp_sm.topk(10))
                         first_logits = logits[:, space_ixs]
-                        first_probs = softmax(first_logits)
-
-    #                topk = first_probs.topk(10, dim=1)[1]
-    #                if ids[i] == bos_id:
-    #                    topk = subword_ixs[topk]
-    #                else:
-    #                    topk = space_ixs[topk]
-    #                debug("topk next tokens (after ix conversion):", topk)
+                        first_probs = softmax(first_logits.double())
 
                     ix = torch.multinomial(first_probs, 1)
                     # dim: window
@@ -319,6 +337,9 @@ def main(args):
                     debug("curr log prob:", curr_log_prob)
                     #debug("sample:", tokenizer.convert_ids_to_tokens(ix), "prob:", sample_prob)
 
+                    if gpu:
+                        ix = ix.cuda()
+
                     output = model(
                         input_ids=ix.unsqueeze(1),
                         past_key_values=DynamicCache.from_legacy_cache(master_kv), use_cache=True
@@ -327,7 +348,7 @@ def main(args):
                     # the input sequence
                     sample_kv = output.past_key_values
                     logits = output.logits.squeeze(1)
-                    probs = softmax(logits)
+                    probs = softmax(logits.double())
 
                     # for subsequent sampling steps, options are subword tokens
                     # or EOW. EOW sums over all space tokens
@@ -338,7 +359,6 @@ def main(args):
                     # dim: sample x 1
                     eow_prob = torch.sum(space_probs, dim=1, keepdim=True)
                     probs = torch.cat([subword_probs, eow_prob], dim=1)
-                    # TODO convert ix to index among all tokens, not just subwords
                     ix = torch.multinomial(probs, 1)
 
                     sample_prob = probs.gather(dim=1, index=ix).squeeze(dim=1)
@@ -351,6 +371,8 @@ def main(args):
                     ix = subword_ixs.gather(dim=0, index=ix_filtered.squeeze(1)).unsqueeze(1)
                     ix_filtered = ix * is_subword
                     eow = torch.full((samples_per_batch, 1), EOW_IX)
+                    if gpu:
+                        eow = eow.cuda()
                     eow_filler = is_eow * eow
                     ix = ix_filtered + eow_filler
 
@@ -363,6 +385,8 @@ def main(args):
                     # two subword tokens have been sampled so far
                     iterations = 2
                     while still_going.sum() > 0 and iterations < max_iterations:
+                        if gpu:
+                            ix = ix.cuda()
                         debug("Current iteration:", iterations)
                         output = model(
                             input_ids=ix,
@@ -370,7 +394,7 @@ def main(args):
                         )
                         sample_kv = output.past_key_values
                         logits = output.logits.squeeze(1)
-                        probs = softmax(logits)
+                        probs = softmax(logits.double())
 
                         # for subsequent sampling steps, options are subword tokens
                         # or EOW. EOW sums over all space tokens
@@ -393,6 +417,8 @@ def main(args):
                         ix = subword_ixs.gather(dim=0, index=ix_filtered.squeeze(1)).unsqueeze(1)
                         ix_filtered = ix * is_subword
                         eow = torch.full((samples_per_batch, 1), EOW_IX)
+                        if gpu:
+                            eow = eow.cuda()
                         eow_filler = is_eow * eow
                         ix = ix_filtered + eow_filler
 
@@ -416,7 +442,16 @@ def main(args):
                 debug("converted:", batch_log_probs)
                 window_log_probs = torch.cat([window_log_probs, batch_log_probs], dim=1)
             # end loop over batches for a window
-            window_entropies = -torch.mean(window_log_probs, dim=1)
+            # alpha=1 corresponds to shannon entropy, i.e. expected surprisal
+            if alpha == 1:
+                window_entropies = -torch.mean(window_log_probs, dim=1)
+            # MC estimate of Renyi entropy for alpha != 1
+            else:
+                # raw probabilities to alpha-1 power
+                x = torch.pow(2**window_log_probs.double(), alpha-1)
+                debug("story entropies[:20]:", story_entropies[:20])
+                x = torch.sum(x, dim=1) / num_samples
+                window_entropies = torch.log2(x) / (1-alpha)
             story_entropies.extend(window_entropies.tolist())
         # end loop over windows in a story
         debug("story entropies[:20]:", story_entropies[:20])
@@ -425,16 +460,19 @@ def main(args):
         debug(ids[start_ix:][:20])
         debug("window word_final [:20]:")
         debug(word_final[start_ix:][:20])
-        print_entropies(story_entropies, story_ids, story_word_final, tokenizer)
+        print_entropies(story_entropies, story_ids, story_word_final, tokenizer, bos_id)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("sentitems")
     parser.add_argument("model")
+    parser.add_argument("--alpha", "-a", type=float, default=1., help="alpha parameter for renyi entropy. alpha=1 gives shannon entropy")
     parser.add_argument("--samples", "-s", type=int, default=64)
     parser.add_argument("--samplesPerBatch", "-b", type=int, default=2)
     parser.add_argument("--maxIter", "-m", type=int, default=20)
     parser.add_argument("--contextSize", "-c", type=int, default=None)
+    parser.add_argument("--seed", "-d", type=int, default=None)
+    parser.add_argument("--gpu", "-g", action="store_true")
     args = parser.parse_args()
     main(args)
