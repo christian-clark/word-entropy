@@ -19,7 +19,7 @@ Other command-line arguments:
 * `--unrestricted`: calculate first-token entropy over the full token vocabulary T rather than the subset of space-intial tokens T_B
 * `--gpu`: use GPU
 
-## Monte Carlo word entropy
+## Monte Carlo word entropy calculation
 
 Shannon entropy with 64 samples per word:
 ```
